@@ -1,0 +1,1007 @@
+openapi: 3.1.0
+info:
+  title: HomePilot API
+  version: 0.1.0
+  description: |
+    HomePilot は共働き家庭の意思決定負荷を自動操縦するスマホアプリのバックエンド API。
+    AI-DLC ハッカソン Inception フェーズの提出物として、Must + Should 優先度の
+    ユーザーストーリー（US-01, US-02, US-03, US-04, US-06, US-07, US-08, US-09,
+    US-10, US-11, US-12, US-14, US-16, US-17）をカバーする。
+
+    認証は Amazon Cognito User Pool（Sign in with Apple / Google フェデレーション）が
+    発行する JWT を `Authorization: Bearer` ヘッダで送信する。
+  contact:
+    name: HomePilot Team
+
+servers:
+  - url: https://api.homepilot.example.com/v1
+    description: Production
+  - url: https://stg-api.homepilot.example.com/v1
+    description: Staging
+
+tags:
+  - name: nursery
+    description: 保育園関連（US-01 / US-02 / US-06 / US-07）
+  - name: supplies
+    description: 持ち物・物資（US-03 / US-04）
+  - name: partner
+    description: 夫婦協働（US-08 / US-09 / US-10）
+  - name: command
+    description: 司令塔（US-11 / US-12 / US-14）
+  - name: ambient
+    description: 環境信号トリガ（US-16 / US-17）
+
+security:
+  - bearerAuth: []
+
+paths:
+  /letters:
+    post:
+      tags: [nursery]
+      summary: お便り画像をアップロードして解釈を開始（US-01）
+      description: |
+        紙のお便りを画像でアップロードし、Textract + Bedrock による構造化抽出を
+        非同期で開始する。完了状態は GET /letters/{id} で取得。
+      operationId: uploadLetter
+      requestBody:
+        required: true
+        content:
+          multipart/form-data:
+            schema:
+              type: object
+              required: [image]
+              properties:
+                image:
+                  type: string
+                  format: binary
+                note:
+                  type: string
+      responses:
+        '202':
+          description: 受領、非同期処理開始
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Letter' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '413': { $ref: '#/components/responses/PayloadTooLarge' }
+        '500': { $ref: '#/components/responses/InternalError' }
+
+  /letters/{id}:
+    get:
+      tags: [nursery]
+      summary: お便りの解釈結果を取得（US-01）
+      operationId: getLetter
+      parameters:
+        - $ref: '#/components/parameters/LetterId'
+      responses:
+        '200':
+          description: 解釈結果
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ParsedLetter' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '500': { $ref: '#/components/responses/InternalError' }
+
+  /diary/draft:
+    post:
+      tags: [nursery]
+      summary: 連絡帳下書きを生成（US-06）
+      operationId: createDiaryDraft
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/DiaryDraftInput' }
+      responses:
+        '200':
+          description: 下書き生成済
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/DiaryDraft' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '500': { $ref: '#/components/responses/InternalError' }
+
+  /diary/{date}:
+    get:
+      tags: [nursery]
+      summary: 指定日の連絡帳下書きを取得（US-06）
+      operationId: getDiary
+      parameters:
+        - $ref: '#/components/parameters/Date'
+      responses:
+        '200':
+          description: 下書き
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/DiaryDraft' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/NotFound' }
+
+  /diary/{date}/send:
+    post:
+      tags: [nursery]
+      summary: 連絡帳下書きを園に送信（US-06）
+      description: |
+        園への正式連絡は US-12 の自動承認・自動実行から原則除外。
+        個別オプトインがある場合のみ自動経路に乗る。
+      operationId: sendDiary
+      parameters:
+        - $ref: '#/components/parameters/Date'
+      responses:
+        '200':
+          description: 送信済
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/NurseryMessage' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '409': { $ref: '#/components/responses/Conflict' }
+        '500': { $ref: '#/components/responses/InternalError' }
+
+  /nursery/messages:
+    post:
+      tags: [nursery]
+      summary: 園への連絡（欠席・遅刻・お迎え変更 等）（US-07 / US-09）
+      description: |
+        美咲（mom）／夫（dad）どちらの role でも送信可能。
+        オプトイン設定時、システムが自動送信する経路と同一スキーマ。
+      operationId: sendNurseryMessage
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/NurseryMessageInput' }
+      responses:
+        '202':
+          description: 送信受領
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/NurseryMessage' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '500': { $ref: '#/components/responses/InternalError' }
+
+  /supplies/list/{date}:
+    get:
+      tags: [supplies]
+      summary: 指定日の持ち物リストを取得（US-03）
+      operationId: getSuppliesList
+      parameters:
+        - $ref: '#/components/parameters/Date'
+      responses:
+        '200':
+          description: 持ち物リスト
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/SuppliesList' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/NotFound' }
+
+  /supplies/list/{date}/regenerate:
+    post:
+      tags: [supplies]
+      summary: 持ち物リストを再生成（US-03 手動再生成）
+      operationId: regenerateSuppliesList
+      parameters:
+        - $ref: '#/components/parameters/Date'
+      responses:
+        '202':
+          description: 再生成開始
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '500': { $ref: '#/components/responses/InternalError' }
+
+  /supplies/orders:
+    post:
+      tags: [supplies]
+      summary: 不足消耗品を発注（US-04）
+      description: 楽天API経由。オプトイン時はシステム自動発注の経路と同一。
+      operationId: createSupplyOrder
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/SupplyOrderInput' }
+      responses:
+        '202':
+          description: 発注受領
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/SupplyOrder' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '402':
+          description: 上限金額を超過（US-12 除外境界）
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+
+  /tasks:
+    get:
+      tags: [partner]
+      summary: タスク一覧（US-08 / US-09）
+      operationId: listTasks
+      parameters:
+        - in: query
+          name: assignee
+          schema:
+            type: string
+            enum: [me, mom, dad, all]
+        - in: query
+          name: date
+          schema: { type: string, format: date }
+        - in: query
+          name: status
+          schema:
+            type: string
+            enum: [open, done, declined]
+      responses:
+        '200':
+          description: タスク一覧
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: '#/components/schemas/Task' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+
+  /tasks/{id}/assign:
+    post:
+      tags: [partner]
+      summary: タスクを夫または美咲にアサイン（US-08）
+      operationId: assignTask
+      parameters:
+        - $ref: '#/components/parameters/TaskId'
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                assignee:
+                  type: string
+                  enum: [mom, dad]
+      responses:
+        '200':
+          description: アサイン結果
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Task' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+
+  /tasks/{id}/complete:
+    post:
+      tags: [partner]
+      summary: タスク完了（US-09）
+      operationId: completeTask
+      parameters:
+        - $ref: '#/components/parameters/TaskId'
+      responses:
+        '200':
+          description: 完了済
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Task' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409': { $ref: '#/components/responses/Conflict' }
+
+  /tasks/{id}/decline:
+    post:
+      tags: [partner]
+      summary: タスク辞退・再アサイン（US-09）
+      operationId: declineTask
+      parameters:
+        - $ref: '#/components/parameters/TaskId'
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                reason: { type: string }
+      responses:
+        '202':
+          description: 辞退受領、再アサイン開始
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/NotFound' }
+
+  /partner/messages:
+    post:
+      tags: [partner]
+      summary: 夫宛メッセージ送信（自動トーン整形あり）（US-10）
+      operationId: sendPartnerMessage
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/PartnerMessageInput' }
+      responses:
+        '202':
+          description: 送信受領
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/PartnerMessage' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+
+  /home:
+    get:
+      tags: [command]
+      summary: 「今日これだけ」ホーム画面（US-11）
+      description: |
+        美咲モード／夫モードの両方で利用可能。
+        司令塔バトンタッチ中（US-15）はビューも切替。
+      operationId: getHome
+      parameters:
+        - in: query
+          name: date
+          schema: { type: string, format: date }
+      responses:
+        '200':
+          description: 3ブロック構成のホーム
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/HomeView' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+
+  /me/today:
+    get:
+      tags: [partner]
+      summary: 夫モードの「自分の今日」（US-09）
+      description: GET /home の夫スコープエイリアス。
+      operationId: getMyToday
+      responses:
+        '200':
+          description: 当日の自分のタスク
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/HomeView' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+
+  /settings/automation:
+    get:
+      tags: [command]
+      summary: 領域別オプトイン設定一覧（US-12）
+      operationId: getAutomationSettings
+      responses:
+        '200':
+          description: 領域別自動化設定
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/AutomationSettings' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+
+  /settings/automation/{domain}:
+    put:
+      tags: [command]
+      summary: 領域別オプトイン設定を更新（US-12）
+      operationId: updateAutomationSetting
+      parameters:
+        - in: path
+          name: domain
+          required: true
+          schema: { $ref: '#/components/schemas/AutomationDomain' }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/AutomationDomainSetting' }
+      responses:
+        '200':
+          description: 更新済
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/AutomationDomainSetting' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+
+  /approvals:
+    get:
+      tags: [command]
+      summary: 承認待ち一覧（US-12）
+      operationId: listApprovals
+      responses:
+        '200':
+          description: 承認待ち
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: '#/components/schemas/Approval' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+
+  /approvals/bulk:
+    post:
+      tags: [command]
+      summary: 一括承認（US-12）
+      operationId: bulkApprove
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                ids:
+                  type: array
+                  items: { type: string }
+                  description: 省略時は承認待ち全件
+      responses:
+        '200':
+          description: 一括処理結果
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  approved: { type: integer }
+                  skipped: { type: integer }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+
+  /approvals/{id}:
+    post:
+      tags: [command]
+      summary: 単一承認待ちへの承認・却下（US-12）
+      operationId: respondApproval
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema: { type: string }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [action]
+              properties:
+                action:
+                  type: string
+                  enum: [approve, reject]
+      responses:
+        '200':
+          description: 反映済
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Approval' }
+        '404': { $ref: '#/components/responses/NotFound' }
+
+  /automation-logs:
+    get:
+      tags: [command]
+      summary: 事後報告ログ一覧（US-14）
+      operationId: listAutomationLogs
+      parameters:
+        - in: query
+          name: from
+          schema: { type: string, format: date-time }
+        - in: query
+          name: to
+          schema: { type: string, format: date-time }
+        - in: query
+          name: domain
+          schema: { $ref: '#/components/schemas/AutomationDomain' }
+        - in: query
+          name: limit
+          schema: { type: integer, default: 50, maximum: 200 }
+        - in: query
+          name: cursor
+          schema: { type: string }
+      responses:
+        '200':
+          description: ログページ
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/AutomationLogPage' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+
+  /automation-logs/{id}/cancel:
+    post:
+      tags: [command]
+      summary: 自動実行の取消（US-14）
+      operationId: cancelAutomation
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema: { type: string }
+      responses:
+        '202':
+          description: 取消開始（補償処理あり）
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409': { $ref: '#/components/responses/Conflict' }
+
+  /ambient/location:
+    post:
+      tags: [ambient]
+      summary: ジオフェンスイベント受領（US-16）
+      description: Flutter アプリのバックグラウンド位置追跡から発火。
+      operationId: postLocationEvent
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/AmbientLocationEvent' }
+      responses:
+        '202':
+          description: 受領、関連トリガを発火
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+
+  /voice/intent:
+    post:
+      tags: [ambient]
+      summary: 音声ワンショット指示（US-17）
+      description: |
+        Siri Shortcuts / Google Assistant の App Intent から1フレーズを受領し、
+        Bedrock Haiku で意図解析、Step Functions で並列実行を起動する。
+      operationId: postVoiceIntent
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/VoiceIntentInput' }
+      responses:
+        '202':
+          description: 受領、並列実行を起動
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/VoiceIntentResult' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+      description: |
+        Cognito User Pool が発行する ID トークン。クレーム例:
+        - `sub`: Cognito ユーザーID
+        - `cognito:groups`: ["mom"] | ["dad"]
+        - `custom:householdId`: 世帯ID
+
+  parameters:
+    LetterId:
+      in: path
+      name: id
+      required: true
+      schema: { type: string }
+    TaskId:
+      in: path
+      name: id
+      required: true
+      schema: { type: string }
+    Date:
+      in: path
+      name: date
+      required: true
+      schema: { type: string, format: date }
+
+  responses:
+    BadRequest:
+      description: 入力不正
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/Error' }
+    Unauthorized:
+      description: 未認証
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/Error' }
+    Forbidden:
+      description: 権限不足
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/Error' }
+    NotFound:
+      description: 該当なし
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/Error' }
+    Conflict:
+      description: 状態衝突
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/Error' }
+    PayloadTooLarge:
+      description: ペイロード過大（画像10MB上限など）
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/Error' }
+    InternalError:
+      description: サーバー内部エラー
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/Error' }
+
+  schemas:
+    Error:
+      type: object
+      required: [code, message]
+      properties:
+        code:
+          type: string
+          description: 機械可読エラーコード（例 "letter.image.too_large"）
+        message: { type: string }
+        requestId: { type: string }
+        details:
+          type: object
+          additionalProperties: true
+
+    Letter:
+      type: object
+      required: [id, status, uploadedAt]
+      properties:
+        id: { type: string }
+        status:
+          type: string
+          enum: [received, ocr_pending, parsing, parsed, failed]
+        uploadedAt: { type: string, format: date-time }
+        thumbnailUrl: { type: string, format: uri }
+        note: { type: string }
+
+    ParsedLetter:
+      allOf:
+        - $ref: '#/components/schemas/Letter'
+        - type: object
+          properties:
+            events:
+              type: array
+              items: { $ref: '#/components/schemas/ParsedEvent' }
+            items:
+              type: array
+              items:
+                type: object
+                properties:
+                  name: { type: string }
+                  dueDate: { type: string, format: date }
+            confidence:
+              type: number
+              minimum: 0
+              maximum: 1
+
+    ParsedEvent:
+      type: object
+      required: [id, title, date]
+      properties:
+        id: { type: string }
+        title: { type: string }
+        date: { type: string, format: date }
+        time: { type: string }
+        targetClass: { type: string }
+        notes: { type: string }
+
+    DiaryDraftInput:
+      type: object
+      properties:
+        date: { type: string, format: date }
+        temperatureC:
+          type: number
+          minimum: 30
+          maximum: 45
+        sleepHours:
+          type: number
+          minimum: 0
+          maximum: 24
+        dinner: { type: string }
+        mood:
+          type: string
+          enum: [good, normal, low]
+        freeText: { type: string }
+
+    DiaryDraft:
+      type: object
+      required: [date, body, status]
+      properties:
+        date: { type: string, format: date }
+        body: { type: string }
+        status:
+          type: string
+          enum: [draft, sent]
+        smoothedFromOriginal:
+          type: boolean
+          description: トーン整形（US-10）が適用されたか
+        sentAt: { type: string, format: date-time }
+
+    NurseryMessageInput:
+      type: object
+      required: [type]
+      properties:
+        type:
+          type: string
+          enum: [absent, late, pickup_change, custom, diary]
+        date: { type: string, format: date }
+        time: { type: string }
+        reason: { type: string }
+        body: { type: string }
+
+    NurseryMessage:
+      allOf:
+        - $ref: '#/components/schemas/NurseryMessageInput'
+        - type: object
+          required: [id, sender, sentAt]
+          properties:
+            id: { type: string }
+            sender:
+              type: string
+              enum: [mom, dad, system]
+            sentAt: { type: string, format: date-time }
+
+    HomeView:
+      type: object
+      required: [date, blocks]
+      properties:
+        date: { type: string, format: date }
+        commander:
+          type: string
+          enum: [mom, dad]
+          description: 司令塔ロール（US-15）
+        blocks:
+          type: object
+          required: [todo, done, partner]
+          properties:
+            todo:
+              type: array
+              items: { $ref: '#/components/schemas/HomeBlockItem' }
+            done:
+              type: array
+              items: { $ref: '#/components/schemas/HomeBlockItem' }
+            partner:
+              type: array
+              items: { $ref: '#/components/schemas/HomeBlockItem' }
+
+    HomeBlockItem:
+      type: object
+      required: [refType, refId, title]
+      properties:
+        refType:
+          type: string
+          enum: [task, approval, automation_log, supplies_list, calendar_event]
+        refId: { type: string }
+        title: { type: string }
+        time: { type: string }
+        urgency:
+          type: string
+          enum: [normal, immediate]
+
+    Task:
+      type: object
+      required: [id, title, status]
+      properties:
+        id: { type: string }
+        title: { type: string }
+        description: { type: string }
+        assignee:
+          type: string
+          enum: [mom, dad, unassigned]
+        status:
+          type: string
+          enum: [open, done, declined]
+        dueAt: { type: string, format: date-time }
+        place: { type: string }
+        createdAt: { type: string, format: date-time }
+        autoAssigned: { type: boolean }
+
+    SuppliesList:
+      type: object
+      required: [date, items]
+      properties:
+        date: { type: string, format: date }
+        items:
+          type: array
+          items: { $ref: '#/components/schemas/SupplyItem' }
+        generatedAt: { type: string, format: date-time }
+
+    SupplyItem:
+      type: object
+      required: [name, source]
+      properties:
+        name: { type: string }
+        quantity: { type: integer }
+        source:
+          type: string
+          enum: [weekly, event, seasonal, weather]
+        haveAtHome:
+          type: [boolean, "null"]
+        sku: { type: string }
+
+    SupplyOrderInput:
+      type: object
+      required: [items]
+      properties:
+        items:
+          type: array
+          items:
+            type: object
+            required: [sku, quantity]
+            properties:
+              sku: { type: string }
+              quantity: { type: integer, minimum: 1 }
+
+    SupplyOrder:
+      type: object
+      required: [orderId, status]
+      properties:
+        orderId: { type: string }
+        status:
+          type: string
+          enum: [pending, placed, failed]
+        totalJpy: { type: integer }
+        items:
+          type: array
+          items: { $ref: '#/components/schemas/SupplyItem' }
+
+    AutomationDomain:
+      type: string
+      enum:
+        - nursery_letter
+        - nursery_calendar
+        - nursery_diary
+        - nursery_message
+        - supplies_list
+        - supplies_order
+        - partner_assign
+        - partner_tone
+        - ambient_location
+        - ambient_weather
+        - ambient_voice
+      description: |
+        領域別オプトイン制御の対象（US-12）。各値の対応 US:
+        - nursery_letter: US-01
+        - nursery_calendar: US-02
+        - nursery_diary: US-06
+        - nursery_message: US-07
+        - supplies_list: US-03
+        - supplies_order: US-04
+        - partner_assign: US-08
+        - partner_tone: US-10
+        - ambient_location: US-16（位置）
+        - ambient_weather: US-16（天気）
+        - ambient_voice: US-17
+
+    AutomationDomainSetting:
+      type: object
+      required: [domain, autoApprove, autoExecute]
+      properties:
+        domain: { $ref: '#/components/schemas/AutomationDomain' }
+        autoApprove:
+          type: boolean
+          description: 「次回から自動承認」（US-12）
+        autoExecute:
+          type: boolean
+          description: 「自動実行」=提案そのものをスキップ（US-12）
+        exclusions:
+          type: object
+          properties:
+            highValueThresholdJpy:
+              type: integer
+              description: US-04 の上限金額（超過時は除外）
+            optInOverrides:
+              type: array
+              items: { type: string }
+              description: |
+                個別オプトインで重大判断除外を解除する項目
+                （例: "nursery_message.absent_on_high_temp"）
+
+    AutomationSettings:
+      type: array
+      items: { $ref: '#/components/schemas/AutomationDomainSetting' }
+
+    Approval:
+      type: object
+      required: [id, domain, status, proposedAt]
+      properties:
+        id: { type: string }
+        domain: { $ref: '#/components/schemas/AutomationDomain' }
+        status:
+          type: string
+          enum: [pending, approved, rejected, expired]
+        proposedAt: { type: string, format: date-time }
+        decidedAt: { type: string, format: date-time }
+        summary: { type: string }
+        payload:
+          type: object
+          additionalProperties: true
+
+    AutomationLog:
+      type: object
+      required: [id, domain, action, status, executedAt]
+      properties:
+        id: { type: string }
+        domain: { $ref: '#/components/schemas/AutomationDomain' }
+        action: { type: string }
+        status:
+          type: string
+          enum: [executed, cancelled, failed]
+        executedAt: { type: string, format: date-time }
+        canCancel: { type: boolean }
+        summary: { type: string }
+        details:
+          type: object
+          additionalProperties: true
+
+    AutomationLogPage:
+      type: object
+      required: [items]
+      properties:
+        items:
+          type: array
+          items: { $ref: '#/components/schemas/AutomationLog' }
+        nextCursor: { type: string }
+
+    PartnerMessageInput:
+      type: object
+      required: [body]
+      properties:
+        body: { type: string }
+        urgency:
+          type: string
+          enum: [normal, urgent]
+          default: normal
+
+    PartnerMessage:
+      type: object
+      required: [messageId, originalBody, smoothedBody]
+      properties:
+        messageId: { type: string }
+        originalBody: { type: string }
+        smoothedBody: { type: string }
+        urgency:
+          type: string
+          enum: [normal, urgent]
+
+    AmbientLocationEvent:
+      type: object
+      required: [eventType, occurredAt]
+      properties:
+        eventType:
+          type: string
+          enum:
+            - nursery_arrived
+            - nursery_left
+            - home_arrived
+            - dad_left_office
+        occurredAt: { type: string, format: date-time }
+        accuracyMeters:
+          type: number
+          minimum: 0
+
+    VoiceIntentInput:
+      type: object
+      required: [transcript]
+      properties:
+        transcript: { type: string }
+        locale:
+          type: string
+          default: ja-JP
+        source:
+          type: string
+          enum: [siri, google_assistant, in_app]
+
+    VoiceIntentResult:
+      type: object
+      required: [intent, plannedActions]
+      properties:
+        intent:
+          type: string
+          description: 例 "child_fever_workflow"
+        plannedActions:
+          type: array
+          items:
+            type: object
+            properties:
+              type: { type: string }
+              targetDomain: { $ref: '#/components/schemas/AutomationDomain' }
+        executionId:
+          type: string
+          description: 進捗確認用 (Step Functions execution ARN suffix)
